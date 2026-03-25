@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 import backend.models  # noqa: F401 — registers all ORM models with Base.metadata
 from backend.database import Base, get_db
@@ -11,7 +12,11 @@ TEST_DB_URL = "sqlite:///:memory:"
 
 @pytest.fixture(scope="function")
 def test_engine():
-    engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        TEST_DB_URL,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(bind=engine)
     yield engine
     Base.metadata.drop_all(bind=engine)
