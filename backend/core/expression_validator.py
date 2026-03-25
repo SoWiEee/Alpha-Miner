@@ -20,10 +20,12 @@ BLACKLISTED_TOKENS: frozenset[str] = frozenset({
 
 # Matches function-call patterns: word(
 _FUNC_CALL_RE = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
-# Matches trailing integer in a ts_ / adv call: , N)
-_WINDOW_ARG_RE = re.compile(
-    r"\b(?:ts_mean|ts_std|ts_delta|ts_rank|ts_corr|ts_covariance|"
-    r"ts_max|ts_min|ts_median|ts_argmax|ts_argmin|adv)\b[^)]*,\s*(\d+)\s*\)"
+_TS_FUNC_NAMES_RE = re.compile(
+    r"\b(ts_mean|ts_std|ts_delta|ts_rank|ts_corr|ts_covariance|"
+    r"ts_max|ts_min|ts_median|ts_argmax|ts_argmin|adv)\s*\("
+)
+_BLACKLIST_WORD_RE = re.compile(
+    r"\b(?:import|eval|exec|compile|globals|locals|vars|dir|getattr|setattr)\b"
 )
 
 
@@ -72,17 +74,40 @@ class ExpressionValidator:
         return ValidationResult(True)
 
     def _check_numeric_ranges(self, expression: str) -> ValidationResult:
-        for match in _WINDOW_ARG_RE.finditer(expression):
-            window = int(match.group(1))
-            if window < 1 or window > 252:
-                return ValidationResult(
-                    False,
-                    f"Window argument out of range [1, 252]: {window}",
-                )
+        for match in _TS_FUNC_NAMES_RE.finditer(expression):
+            # Scan from '(' to find top-level args (ignoring nested parens)
+            start = match.end() - 1  # position of '('
+            depth = 0
+            args: list[str] = []
+            arg_start = start + 1
+            for i in range(start, len(expression)):
+                ch = expression[i]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        args.append(expression[arg_start:i].strip())
+                        break
+                elif ch == "," and depth == 1:
+                    args.append(expression[arg_start:i].strip())
+                    arg_start = i + 1
+            # Check if last arg is an integer window
+            if args:
+                last_arg = args[-1].strip()
+                if re.fullmatch(r"\d+", last_arg):
+                    window = int(last_arg)
+                    if window < 1 or window > 252:
+                        return ValidationResult(
+                            False,
+                            f"Window argument out of range [1, 252]: {window}",
+                        )
         return ValidationResult(True)
 
     def _check_blacklist(self, expression: str) -> ValidationResult:
-        for token in BLACKLISTED_TOKENS:
-            if token in expression:
-                return ValidationResult(False, f"Forbidden token: {token!r}")
+        if "__" in expression:
+            return ValidationResult(False, "Forbidden token: '__'")
+        m = _BLACKLIST_WORD_RE.search(expression)
+        if m:
+            return ValidationResult(False, f"Forbidden token: {m.group()!r}")
         return ValidationResult(True)
