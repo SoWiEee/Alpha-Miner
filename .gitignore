@@ -30,6 +30,9 @@ frontend/.vite/
 Thumbs.db
 .claude/
 
+# Worktrees
+.worktrees/
+
 # Logs
 *.log
 logs/
