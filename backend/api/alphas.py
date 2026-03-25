@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
-from backend.core.models import AlphaCandidate, AlphaSource, compute_alpha_id
+from backend.core.models import AlphaSource, compute_alpha_id
 from backend.database import get_db
 from backend.models.alpha import Alpha
 from backend.models.simulation import Simulation
@@ -9,17 +9,6 @@ from backend.schemas.alpha import AlphaCreate, AlphaRead
 
 router = APIRouter(tags=["alphas"])
 
-
-def _orm_to_domain(orm: Alpha) -> AlphaCandidate:
-    return AlphaCandidate(
-        id=orm.id, expression=orm.expression, universe=orm.universe,
-        region=orm.region, delay=orm.delay, decay=orm.decay,
-        neutralization=orm.neutralization, truncation=orm.truncation,
-        pasteurization=orm.pasteurization, nan_handling=orm.nan_handling,
-        source=AlphaSource(orm.source), parent_id=orm.parent_id,
-        rationale=orm.rationale, created_at=orm.created_at,
-        filter_skipped=orm.filter_skipped,
-    )
 
 
 @router.get("/alphas", response_model=list[AlphaRead])
@@ -43,7 +32,7 @@ def get_alpha(alpha_id: str, db: Session = Depends(get_db)):
     return alpha
 
 
-@router.post("/alphas", response_model=AlphaRead)
+@router.post("/alphas", response_model=AlphaRead, status_code=201)
 def create_alpha(body: AlphaCreate, db: Session = Depends(get_db)):
     alpha_id = compute_alpha_id(
         body.expression, body.universe, body.region, body.delay,
