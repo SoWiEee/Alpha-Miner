@@ -14,7 +14,7 @@ Deliver a working FastAPI backend that can:
 3. Validate generated expressions via `ExpressionValidator`
 4. Persist alphas to SQLite and expose them via REST API
 
-**KPI**: `POST /api/generate/mutate` returns a JSON list of mutation candidates that have passed validation and been stored in the DB.
+**KPI** (from spec §2.6): The system can generate a batch of mutation candidates from Alpha101 seeds, validate them, and display them in a table via `POST /api/generate/mutate` or the `scripts/show_candidates.py` CLI script.
 
 ---
 
@@ -24,8 +24,10 @@ Deliver a working FastAPI backend that can:
 |----------|--------|-----------|
 | Alpha101 seed pool size | ~25 representative formulas | Covers major strategy types; avoids 101-formula upfront cost |
 | Implementation approach | Full spec structure from day one | Eliminates Phase 2–6 refactoring; clean insertion points |
-| Python version | 3.12 (uv resolved) | Within `>=3.11,<3.13` constraint; gplearn 0.4.3 compatible |
+| Python version | 3.12 (uv resolved) | gplearn 0.4.3 verified compatible with 3.12; spec.md §1.1 will be updated to reflect `>=3.11,<3.13` |
+| gplearn version | 0.4.3 (latest available) | Installs cleanly under 3.12; spec.md pin of 0.4.2 is outdated |
 | DB migrations | Alembic | Already in stack; standard SQLAlchemy migration tool |
+| `delay` excluded from CONFIG_VARIANTS | Intentional | `delay=0` (same-day signal) is qualitatively different from `delay=1`; mixing them in automated mutations produces semantically ambiguous candidates. Delay variation is deferred to manual alpha authoring. |
 
 ---
 
@@ -33,7 +35,7 @@ Deliver a working FastAPI backend that can:
 
 ```
 backend/
-├── main.py                      # FastAPI app, mounts routers
+├── main.py                      # FastAPI app, mounts routers, CORS middleware
 ├── config.py                    # pydantic-settings Settings class
 ├── database.py                  # SQLAlchemy engine + get_db session factory
 ├── models/
@@ -48,7 +50,7 @@ backend/
 ├── api/
 │   ├── __init__.py
 │   ├── alphas.py                # GET/POST/DELETE /api/alphas
-│   ├── generate.py              # POST /api/generate/mutate (Phase 1 active)
+│   ├── generate.py              # POST /api/generate/mutate + GET /api/generate/runs (Phase 1)
 │   ├── submit.py                # Stub (Phase 2)
 │   └── pool.py                  # Stub (Phase 3+)
 ├── core/
@@ -69,7 +71,8 @@ db/
 └── migrations/                  # Alembic env + version scripts
 
 scripts/
-└── seed_alpha101.py             # One-time: load seed pool into DB
+├── seed_alpha101.py             # One-time: load seed pool into DB
+└── show_candidates.py           # CLI: display latest mutation batch as a table
 ```
 
 ---
@@ -81,7 +84,7 @@ scripts/
 ```python
 @dataclass
 class AlphaCandidate:
-    id: str                    # SHA256(expression + canonical config JSON)
+    id: str                    # SHA256(canonical_config_string) — see §4 note
     expression: str
     universe: str              # default "TOP3000"
     region: str                # default "USA"
@@ -95,9 +98,17 @@ class AlphaCandidate:
     parent_id: str | None
     rationale: str | None
     created_at: datetime
+    filter_skipped: bool = False   # True if diversity filter was skipped (Phase 3)
 ```
 
-ID is deterministic: `SHA256(expression + sorted config fields)`. Duplicate expressions with identical config produce the same ID and are naturally deduplicated.
+**ID canonicalisation**: `SHA256` is computed over a deterministic JSON string:
+```
+SHA256(json.dumps({"expression": expr.strip(), "universe": ..., "region": ...,
+                   "delay": int, "decay": int, "neutralization": ...,
+                   "truncation": f"{trunc:.4f}", "pasteurization": ...,
+                   "nan_handling": ...}, sort_keys=True))
+```
+All string fields are lowercased before hashing. `truncation` is formatted to 4 decimal places to avoid float repr differences. This ensures duplicate expressions with identical config always produce the same ID.
 
 ### `AlphaSource` (enum)
 
@@ -124,7 +135,7 @@ class AlphaSource(str, Enum):
 | Volatility | 4 | Alpha#19, #20 |
 | Correlation-based | 5 | Alpha#9, #17 |
 
-Each seed is a hardcoded `AlphaCandidate` with `source=AlphaSource.SEED`.
+Each seed is a hardcoded `AlphaCandidate` with `source=AlphaSource.SEED` and `filter_skipped=False`.
 
 Default config for all seeds: `universe=TOP3000, region=USA, delay=1, decay=0, neutralization=subindustry, truncation=0.08, pasteurization=off, nan_handling=off`.
 
@@ -151,7 +162,10 @@ Four checks (all must pass):
 
 Invalid expressions are logged at WARNING level and silently discarded — they never raise exceptions to callers.
 
-`ALLOWED_OPERATORS` mirrors the WQ Fast Expression operator list: `ts_mean`, `ts_std`, `ts_delta`, `ts_rank`, `ts_corr`, `ts_covariance`, `ts_max`, `ts_min`, `ts_median`, `rank`, `zscore`, `scale`, `log`, `abs`, `sign`, `IndNeutralize`, `adv`, `cap`, `returns`, `open`, `high`, `low`, `close`, `volume`, `vwap`.
+`ALLOWED_OPERATORS` mirrors the WQ Fast Expression operator list:
+`ts_mean`, `ts_std`, `ts_delta`, `ts_rank`, `ts_corr`, `ts_covariance`, `ts_max`, `ts_min`, `ts_median`, `rank`, `zscore`, `scale`, `log`, `abs`, `sign`, `IndNeutralize`, `adv`, `cap`, `returns`, `open`, `high`, `low`, `close`, `volume`, `vwap`.
+
+Note: `ts_covariance` is included because `OPERATOR_SWAPS` maps `ts_corr → ts_covariance`; excluding it would cause the validator to reject valid mutation outputs.
 
 ---
 
@@ -170,6 +184,8 @@ class TemplateMutator:
         "decay": [0, 4, 8],
         "truncation": [0.05, 0.08, 0.10],
     }
+    # delay intentionally excluded: delay=0 vs delay=1 is a semantic choice,
+    # not a mechanical variation. Delay is fixed at the seed's value.
 
     def mutate_lookback(self, alpha: AlphaCandidate) -> list[AlphaCandidate]: ...
     def mutate_operator(self, alpha: AlphaCandidate) -> list[AlphaCandidate]: ...
@@ -184,7 +200,7 @@ class TemplateMutator:
 - `mutate_config`: varies `neutralization`, `decay`, `truncation` while keeping expression identical
 - `mutate_all`: calls all four, runs each result through `ExpressionValidator`, deduplicates by `id`
 
-All mutations set `source=AlphaSource.MUTATION` and `parent_id=alpha.id`.
+All mutations set `source=AlphaSource.MUTATION`, `parent_id=alpha.id`, `filter_skipped=False`.
 
 ---
 
@@ -194,7 +210,7 @@ Full schema from spec §8 is created in Phase 1 (all 5 tables), so later phases 
 
 Alembic initial migration creates all tables and indexes.
 
-`scripts/seed_alpha101.py` loads the hardcoded seed pool into the `alphas` table (idempotent via `INSERT OR IGNORE`).
+`scripts/seed_alpha101.py` loads the hardcoded seed pool into the `alphas` table. Idempotent: uses SQLAlchemy `insert(...).prefix_with("OR IGNORE")` (SQLite). Because IDs are deterministic SHA256 hashes over canonicalised input (see §4), re-running produces no duplicates as long as the seed definitions are unchanged.
 
 ---
 
@@ -210,37 +226,54 @@ Returns: `AlphaRead` or 404
 ### `POST /api/alphas`
 Body: `AlphaCreate`
 Returns: `AlphaRead` (201)
+If an alpha with the same deterministic ID already exists: returns **200** with the existing record (idempotent, not an error).
 
 ### `DELETE /api/alphas/{id}`
-Returns: 204
+- If the alpha has child mutations (`parent_id` references) or linked simulations: returns **409 Conflict** with a message listing the blocking record counts.
+- If no child records: deletes and returns 204.
+- Rationale: cascade delete is risky for research data; the user must explicitly clean up dependents first.
 
 ### `POST /api/generate/mutate`
 Body: `{ "alpha_id": str | null, "strategies": ["lookback","operator","rank_wrap","config"] }`
-- If `alpha_id` is null: mutate all seeds
-- If `alpha_id` is provided: mutate that specific alpha
+- If `alpha_id` is null: mutate all seeds in DB
+- If `alpha_id` is provided: mutate that specific alpha (404 if not found)
 - Runs validator on each candidate; discards invalid
 - Persists passing candidates to `alphas` table (skips duplicates)
-- Logs a `runs` entry
-Returns: `{ "run_id": int, "generated": int, "passed": int, "candidates": list[AlphaRead] }`
+- Logs a `runs` entry with:
+  - `mode = "mutation"`
+  - `candidates_gen` = total mutation candidates produced (before validation)
+  - `candidates_pass` = count that passed validation (note: spec.md §8 comments this column as "passed diversity filter", but in Phase 1 there is no filter — this column holds validation-pass count until Phase 3 adds the filter and the meaning converges)
+Returns: `{ "run_id": int, "candidates_generated": int, "candidates_passed_validation": int, "candidates": list[AlphaRead] }`
+
+### `GET /api/generate/runs`
+Returns: list of all `runs` entries, newest first. Active in Phase 1.
 
 ### Stubs (return 501 Not Implemented)
 `POST /api/generate/llm`, `POST /api/generate/gp`, all `/api/submit/*`, all `/api/pool/*`
 
 ---
 
-## 10. Error Handling
+## 10. CORS
 
-- DB session errors: FastAPI exception handler returns 500
-- Invalid `alpha_id` in mutate request: 404
-- Expression validator failures: logged, not raised; reflected in `generated` vs `passed` counts
-- Duplicate alpha IDs on insert: silently skipped (idempotent)
+`main.py` includes `CORSMiddleware`. In Phase 1, `allowed_origins` defaults to `["http://localhost:5173"]` (Vite dev server). A `CORS_ORIGINS` env var (comma-separated) can override this in later phases.
 
 ---
 
-## 11. Out of Scope (Phase 1)
+## 11. Error Handling
+
+- DB session errors: FastAPI exception handler returns 500
+- Invalid `alpha_id` in mutate request: 404
+- Expression validator failures: logged at WARNING, not raised; reflected in `candidates_generated` vs `candidates_passed_validation` counts
+- Duplicate alpha IDs on insert: silently skipped (idempotent)
+- DELETE with child records: 409 Conflict
+
+---
+
+## 12. Out of Scope (Phase 1)
 
 - Diversity filtering (Phase 3)
 - Any frontend (Phase 6)
 - LLM / GP generation (Phase 4/5)
 - WQ Brain interface (Phase 2)
 - `proxy_prices` table population
+- `delay` variation in mutations (intentional — see §2 Decisions)
