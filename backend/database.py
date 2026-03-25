@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
@@ -8,6 +10,7 @@ class Base(DeclarativeBase):
     pass
 
 
+@lru_cache
 def get_engine():
     settings = get_settings()
     kwargs = {}
