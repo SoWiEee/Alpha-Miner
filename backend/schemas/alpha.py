@@ -76,3 +76,15 @@ class LLMResponse(BaseModel):
     candidates_skipped_filter: int
     candidates_rejected_diversity: int
     candidates: list[AlphaRead]
+
+
+class GPRequest(BaseModel):
+    n_results: int = 10
+    population_size: int | None = None
+    generations: int | None = None
+
+
+class GPResponse(BaseModel):
+    run_id: int
+    status: str
+    message: str

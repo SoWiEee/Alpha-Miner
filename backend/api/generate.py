@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from backend.config import get_settings
 from backend.core.expression_validator import ExpressionValidator
+from backend.core.gp_searcher import GPSearcher
 from backend.core.llm_generator import LLMGenerator, PoolContext
 from backend.core.models import AlphaCandidate, AlphaSource
 from backend.core.mutator import TemplateMutator
@@ -17,6 +18,8 @@ from backend.models.correlation import Run
 from backend.models.simulation import Simulation
 from backend.schemas.alpha import (
     AlphaRead,
+    GPRequest,
+    GPResponse,
     LLMRequest,
     LLMResponse,
     MutateRequest,
@@ -31,6 +34,18 @@ _mutator = TemplateMutator()
 _validator = ExpressionValidator()
 _evaluator = AlphaEvaluator()
 _proxy_mgr = ProxyDataManager()
+
+
+# DB factory for GP background task — can be overridden in tests
+def _default_gp_db_factory():
+    from backend.database import get_engine
+    from sqlalchemy.orm import sessionmaker
+    engine = get_engine()
+    Session = sessionmaker(bind=engine)
+    return Session()
+
+
+_gp_db_factory = _default_gp_db_factory
 
 
 def _alpha_orm_to_candidate(orm: Alpha) -> AlphaCandidate:
@@ -285,6 +300,92 @@ def generate_llm(body: LLMRequest, db: Session = Depends(get_db)):
     )
 
 
-@router.post("/generate/gp", status_code=501)
-def generate_gp():
-    return {"detail": "Not implemented (Phase 5)"}
+def _run_gp_background(
+    run_id: int,
+    panel,
+    n_results: int,
+    population_size: int,
+    generations: int,
+    db_factory,
+):
+    db = db_factory()
+    try:
+        searcher = GPSearcher()
+        try:
+            raw = searcher.run(panel, n_results, population_size, generations)
+        except Exception:
+            raw = []
+
+        valid = [c for c in raw if _validator.validate(c.expression).valid]
+        settings = get_settings()
+        accepted, _, _ = _apply_diversity(valid, db, settings)
+
+        saved = []
+        for c in accepted:
+            if db.get(Alpha, c.id) is None:
+                orm = _candidate_to_orm(c)
+                db.add(orm)
+                saved.append(orm)
+
+        run = db.get(Run, run_id)
+        if run:
+            run.candidates_gen = len(raw)
+            run.candidates_pass = len(saved)
+            run.finished_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception:
+        try:
+            run = db.get(Run, run_id)
+            if run and run.finished_at is None:
+                run.finished_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+@router.post("/generate/gp", response_model=GPResponse, status_code=202)
+def generate_gp(
+    body: GPRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    settings = get_settings()
+    panel = _proxy_mgr.get_panel(db)
+    if panel.empty:
+        raise HTTPException(
+            status_code=503,
+            detail="No proxy data available. Run update_proxy_data first.",
+        )
+
+    pop_size = body.population_size or settings.GP_POPULATION_SIZE
+    gens = body.generations or settings.GP_GENERATIONS
+
+    run = Run(
+        mode="gp",
+        gp_generations=gens,
+        candidates_gen=0,
+        candidates_pass=0,
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    run_id = run.id
+
+    background_tasks.add_task(
+        _run_gp_background,
+        run_id,
+        panel,
+        body.n_results,
+        pop_size,
+        gens,
+        _gp_db_factory,
+    )
+
+    return GPResponse(
+        run_id=run_id,
+        status="running",
+        message=f"GP search started: {pop_size} pop × {gens} gen, seeking {body.n_results} candidates",
+    )
