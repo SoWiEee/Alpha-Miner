@@ -38,3 +38,40 @@ def test_mutate_request_defaults():
     r = MutateRequest()
     assert r.alpha_id is None
     assert set(r.strategies) == {"lookback", "operator", "rank_wrap", "config"}
+
+
+def test_result_import_request_full():
+    from backend.schemas.simulation import ResultImportRequest
+    r = ResultImportRequest(
+        alpha_id="abc123",
+        sharpe=1.43,
+        fitness=1.12,
+        returns=0.087,
+        turnover=0.61,
+        passed=True,
+    )
+    assert r.alpha_id == "abc123"
+    assert r.simulation_id is None
+    assert r.notes is None
+
+
+def test_result_import_request_with_simulation_id():
+    from backend.schemas.simulation import ResultImportRequest
+    r = ResultImportRequest(
+        alpha_id="abc123",
+        simulation_id=42,
+        sharpe=1.43,
+        fitness=1.12,
+        returns=0.087,
+        turnover=0.61,
+        passed=True,
+        notes="test note",
+    )
+    assert r.simulation_id == 42
+    assert r.notes == "test note"
+
+
+def test_enqueue_request():
+    from backend.schemas.simulation import EnqueueRequest
+    r = EnqueueRequest(alpha_id="abc123")
+    assert r.alpha_id == "abc123"
