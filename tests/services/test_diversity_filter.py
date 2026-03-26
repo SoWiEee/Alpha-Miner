@@ -238,3 +238,102 @@ class TestDiversityFilter:
 
         assert submit is False
         assert corr == pytest.approx(0.95)
+
+
+# ── DiversityFilter.filter_batch() tests ──────────────────────────────────────
+
+class TestFilterBatch:
+    def test_filter_batch_empty_pool_returns_all_pass_zero(self, panel):
+        """filter_batch() with empty pool returns (cand, True, 0.0) for each candidate."""
+        filt = DiversityFilter(threshold=0.7)
+        ev = AlphaEvaluator()
+        candidates = [_make_candidate("close"), _make_candidate("rank(close)")]
+        results = filt.filter_batch(candidates, [], ev, panel)
+
+        assert len(results) == 2
+        for cand, should_submit, max_corr in results:
+            assert should_submit is True
+            assert max_corr == 0.0
+
+    def test_filter_batch_unevaluable_candidate_returns_true_nan(self, panel):
+        """filter_batch() returns (cand, True, nan) for unevaluable candidates."""
+        filt = DiversityFilter(threshold=0.7)
+        ev = AlphaEvaluator()
+        candidates = [_make_candidate("adv5")]  # unsupported field
+        pool = [_make_candidate("close")]
+        results = filt.filter_batch(candidates, pool, ev, panel)
+
+        assert len(results) == 1
+        _, should_submit, max_corr = results[0]
+        assert should_submit is True
+        assert math.isnan(max_corr)
+
+    def test_filter_batch_rejects_high_correlation_candidate(self, panel):
+        """filter_batch() rejects candidates whose correlation exceeds threshold."""
+        filt = DiversityFilter(threshold=0.7)
+        ev = AlphaEvaluator()
+        # Identical expressions will have ~1.0 correlation
+        candidate = _make_candidate("rank(close)")
+        pool = [_make_candidate("rank(close)")]
+        results = filt.filter_batch([candidate], pool, ev, panel)
+
+        assert len(results) == 1
+        _, should_submit, max_corr = results[0]
+        assert bool(should_submit) is False
+        assert max_corr > 0.7
+
+    def test_filter_batch_passes_low_correlation_candidate(self, panel):
+        """filter_batch() accepts candidates whose correlation is below threshold."""
+        filt = DiversityFilter(threshold=0.7)
+        ev = AlphaEvaluator()
+        candidate = _make_candidate("rank(close)")
+        pool = [_make_candidate("rank(close)")]
+
+        from unittest.mock import patch
+        with patch("backend.services.diversity_filter.spearmanr") as mock_sr:
+            mock_sr.return_value = (0.3, 0.1)
+            results = filt.filter_batch([candidate], pool, ev, panel)
+
+        assert len(results) == 1
+        _, should_submit, max_corr = results[0]
+        assert should_submit is True
+        assert max_corr == pytest.approx(0.3)
+
+    def test_filter_batch_pool_member_failure_skipped(self, panel):
+        """filter_batch() skips unevaluable pool members without crashing."""
+        filt = DiversityFilter(threshold=0.7)
+        ev = AlphaEvaluator()
+        candidate = _make_candidate("close")
+        bad_pool_member = _make_candidate("adv5")  # unsupported
+        results = filt.filter_batch([candidate], [bad_pool_member], ev, panel)
+
+        assert len(results) == 1
+        _, should_submit, max_corr = results[0]
+        # No valid pool members → treated as empty pool
+        assert should_submit is True
+        assert max_corr == 0.0
+
+    def test_filter_batch_multiple_candidates(self, panel):
+        """filter_batch() correctly processes multiple candidates independently."""
+        filt = DiversityFilter(threshold=0.7)
+        ev = AlphaEvaluator()
+        pool = [_make_candidate("rank(close)")]
+
+        # One candidate identical to pool member (will be rejected)
+        # One candidate that is unevaluable (adv5, will pass with nan)
+        # One candidate with empty pool after bad pool member — but pool is good here
+        candidates = [
+            _make_candidate("rank(close)"),  # high corr → rejected
+            _make_candidate("adv5"),          # unevaluable → pass with nan
+        ]
+        results = filt.filter_batch(candidates, pool, ev, panel)
+        assert len(results) == 2
+
+        # First: rejected (high correlation)
+        _, submit0, corr0 = results[0]
+        assert bool(submit0) is False
+
+        # Second: unevaluable → pass with nan
+        _, submit1, corr1 = results[1]
+        assert submit1 is True
+        assert math.isnan(corr1)

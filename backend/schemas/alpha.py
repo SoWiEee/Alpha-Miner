@@ -61,3 +61,18 @@ class RunRead(BaseModel):
     gp_generations: int | None
     started_at: datetime
     finished_at: datetime | None
+
+
+class LLMRequest(BaseModel):
+    theme: str | None = None
+    n: int = 10
+
+
+class LLMResponse(BaseModel):
+    run_id: int
+    candidates_generated: int
+    candidates_passed_validation: int
+    candidates_passed_diversity: int
+    candidates_skipped_filter: int
+    candidates_rejected_diversity: int
+    candidates: list[AlphaRead]
