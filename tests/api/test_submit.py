@@ -228,3 +228,14 @@ class TestAutoSubmit:
             r = client.post(f"/api/submit/auto/{alpha['id']}")
 
         assert r.status_code == 504
+
+    def test_auto_submit_simulation_failed_returns_502(self, client):
+        from backend.services.wq_interface import SimulationFailed
+        alpha = _insert_alpha(client, expression="rank(ts_delta(high,3))")
+
+        with patch("backend.api.submit.AutoAPIClient") as MockCls:
+            mock_instance = MockCls.return_value
+            mock_instance.submit = AsyncMock(side_effect=SimulationFailed("ERROR"))
+            r = client.post(f"/api/submit/auto/{alpha['id']}")
+
+        assert r.status_code == 502

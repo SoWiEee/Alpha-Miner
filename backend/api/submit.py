@@ -107,16 +107,17 @@ def import_result(body: ResultImportRequest, db: Session = Depends(get_db)):
             .first()
         )
         if sim is None:
-            # Check if there is any simulation at all (might already be completed)
-            any_sim = (
+            # Also allow re-importing results for failed simulations,
+            # and check for completed ones to raise 409 if needed
+            sim = (
                 db.query(Simulation)
                 .filter(Simulation.alpha_id == body.alpha_id)
+                .filter(Simulation.status.in_(["failed", "completed"]))
                 .order_by(Simulation.submitted_at.desc())
                 .first()
             )
-            if any_sim is None:
+            if sim is None:
                 raise HTTPException(status_code=404, detail="No matching simulation found")
-            sim = any_sim
 
     if sim.status == "completed":
         raise HTTPException(status_code=409, detail="Simulation already completed")
