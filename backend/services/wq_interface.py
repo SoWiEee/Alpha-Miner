@@ -125,3 +125,133 @@ class ManualQueueClient(WQBrainInterface):
             return output.getvalue()
 
         return rows
+
+
+# ── AutoAPIClient ────────────────────────────────────────────────────────────
+
+class AutoAPIClient(WQBrainInterface):
+    """Submits alphas to WQ Brain via the unofficial API; blocks until complete."""
+
+    def __init__(
+        self,
+        email: str,
+        password: str,
+        poll_interval: float = 5.0,
+        poll_timeout: float = 300.0,
+    ) -> None:
+        self._email = email
+        self._password = password
+        self._poll_interval = poll_interval
+        self._poll_timeout = poll_timeout
+
+    async def _login(self, client: httpx.AsyncClient) -> None:
+        """POST /authentication with HTTP Basic auth. Raises BiometricAuthRequired if 2FA needed."""
+        resp = await client.post(WQ_AUTH_URL, auth=(self._email, self._password))
+        data = resp.json() if resp.content else {}
+        if "inquiryId" in data:
+            url = (
+                data.get("message")
+                or f"https://platform.worldquantbrain.com/?inquiryId={data['inquiryId']}"
+            )
+            raise BiometricAuthRequired(url)
+
+    async def submit(self, alpha: AlphaCandidate, db: Session) -> str:
+        async with httpx.AsyncClient() as client:
+            # 1. Authenticate
+            await self._login(client)
+
+            # 2. Submit simulation
+            body = {
+                "type": "REGULAR",
+                "settings": {
+                    "instrumentType": "EQUITY",
+                    "region": alpha.region,
+                    "universe": alpha.universe,
+                    "delay": alpha.delay,
+                    "decay": alpha.decay,
+                    "neutralization": alpha.neutralization.upper(),
+                    "truncation": alpha.truncation,
+                    "pasteurization": alpha.pasteurization.upper(),
+                    "nanHandling": alpha.nan_handling.upper(),
+                    "language": "FASTEXPR",
+                    "visualization": False,
+                },
+                "regular": alpha.expression,
+            }
+            resp = await client.post(WQ_SIMULATIONS_URL, json=body)
+
+            if not resp.is_success:
+                sim = Simulation(
+                    alpha_id=alpha.id,
+                    status="failed",
+                    submitted_at=datetime.now(timezone.utc),
+                    completed_at=datetime.now(timezone.utc),
+                )
+                db.add(sim)
+                db.commit()
+                raise RuntimeError(f"WQ Brain submit failed: HTTP {resp.status_code}")
+
+            location_url: str = resp.headers.get("Location", "")
+
+            # 3. Create simulation row (status=submitted)
+            sim = Simulation(
+                alpha_id=alpha.id,
+                status="submitted",
+                wq_sim_id=location_url,
+                submitted_at=datetime.now(timezone.utc),
+            )
+            db.add(sim)
+            db.commit()
+            db.refresh(sim)
+
+            # 4. Poll until done or timeout
+            elapsed = 0.0
+            poll_data: dict = {}
+            while elapsed < self._poll_timeout:
+                await asyncio.sleep(self._poll_interval)
+                elapsed += self._poll_interval
+                poll_resp = await client.get(location_url)
+                poll_data = poll_resp.json()
+                wq_status = poll_data.get("status", "")
+                if wq_status in WQ_DONE_STATUSES:
+                    break
+                if wq_status in WQ_FAILED_STATUSES:
+                    sim.status = "failed"
+                    sim.completed_at = datetime.now(timezone.utc)
+                    db.commit()
+                    raise SimulationFailed(wq_status)
+            else:
+                raise SimulationTimeout(
+                    f"Simulation did not complete within {self._poll_timeout}s"
+                )
+
+            # 5. Fetch alpha metrics
+            alpha_link: str = poll_data.get("alpha", "")
+            if not alpha_link.startswith("http"):
+                alpha_link = WQ_ALPHAS_URL.format(alpha_id=alpha_link)
+            metrics_resp = await client.get(alpha_link)
+            metrics = metrics_resp.json()
+
+            is_data: dict = metrics.get("is", {})
+            checks = is_data.get("checks", [])
+            passed: bool | None = (
+                all(c.get("result") == "PASS" for c in checks) if checks else None
+            )
+
+            # 6. Mark complete and persist metrics
+            sim.status = "completed"
+            sim.sharpe = is_data.get("sharpe")
+            sim.fitness = is_data.get("fitness")
+            sim.returns = is_data.get("returns")
+            sim.turnover = is_data.get("turnover")
+            sim.passed = passed
+            sim.completed_at = datetime.now(timezone.utc)
+            db.commit()
+
+            return str(sim.id)
+
+    async def get_result(self, simulation_id: str, db: Session) -> SimulationRead | None:
+        sim = db.get(Simulation, int(simulation_id))
+        if sim is None:
+            return None
+        return SimulationRead.model_validate(sim)
