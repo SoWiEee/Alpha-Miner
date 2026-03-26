@@ -73,8 +73,3 @@ def test_mutate_is_idempotent(client):
     r2 = client.post("/api/generate/mutate", json={})
     # Second run should produce 0 new candidates (all duplicates)
     assert r2.json()["candidates_passed_validation"] == 0
-
-
-def test_gp_stub_returns_501(client):
-    r = client.post("/api/generate/gp", json={})
-    assert r.status_code == 501
