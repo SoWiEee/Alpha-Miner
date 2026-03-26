@@ -160,20 +160,15 @@ alpha-miner/
 
 ### Prerequisites
 
-- Python 3.11
-- Node.js 18+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - A WorldQuant BRAIN account
 - A Claude API key
 
-### 1. Clone & install backend
+### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourname/alpha-miner.git
-cd alpha-miner
-
-python -m venv venv
-source venv/bin/activate       # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+git clone https://github.com/SoWiEee/Alpha-Miner.git
+cd Alpha-Miner
 ```
 
 ### 2. Configure environment
@@ -185,36 +180,55 @@ cp .env.example .env
 #   WQ_MODE=manual    # start with manual; switch to auto later
 ```
 
-### 3. Initialise the database
+### 3. Start the stack
 
 ```bash
-cd backend
-alembic upgrade head
-python ../scripts/seed_alpha101.py
+docker compose up --build
 ```
 
-### 4. Download proxy data
+- **Backend** → http://localhost:8000 (Swagger UI at `/docs`)
+- **Frontend** → http://localhost:5173
+
+The database is initialised automatically on first start (`alembic upgrade head`).
+
+### 4. Seed the alpha pool (first time only)
+
+In a separate terminal:
 
 ```bash
-python ../scripts/update_proxy_data.py
-# Downloads 2 years of OHLCV for S&P 500 constituents (~15 min first run)
+docker compose exec backend python scripts/seed_alpha101.py
+docker compose exec backend python scripts/update_proxy_data.py
+# update_proxy_data downloads 2 years of S&P 500 OHLCV (~15 min first run)
 ```
 
-### 5. Start the backend
+### 5. Stopping
 
 ```bash
-uvicorn main:app --reload --port 8000
-# API docs available at http://localhost:8000/docs
+docker compose down
 ```
 
-### 6. Start the frontend
+> **Rebuilding after dependency changes:** run `docker compose build` before `docker compose up`.
+
+### Running without Docker
+
+<details>
+<summary>Manual setup (Python 3.11 + Node 18+ required)</summary>
 
 ```bash
-cd ../frontend
+# Backend
+uv sync
+uv run alembic upgrade head
+uv run python scripts/seed_alpha101.py
+uv run python scripts/update_proxy_data.py
+uv run uvicorn backend.main:app --reload --port 8000
+
+# Frontend (separate terminal)
+cd frontend
 npm install
 npm run dev
-# Dashboard at http://localhost:5173
 ```
+
+</details>
 
 ---
 
