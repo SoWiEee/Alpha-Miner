@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,10 @@ class Settings(BaseSettings):
     GP_GENERATIONS: int = 20
     WQ_MODE: str = "manual"
     WQ_REQUEST_INTERVAL_SEC: float = 3.0
+    WQ_EMAIL: str = ""
+    WQ_PASSWORD: SecretStr = SecretStr("")
+    WQ_POLL_INTERVAL_SEC: float = 5.0
+    WQ_POLL_TIMEOUT_SEC: float = 300.0
     CORS_ORIGINS: str = "http://localhost:5173"
 
 
