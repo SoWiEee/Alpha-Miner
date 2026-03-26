@@ -75,11 +75,6 @@ def test_mutate_is_idempotent(client):
     assert r2.json()["candidates_passed_validation"] == 0
 
 
-def test_llm_stub_returns_501(client):
-    r = client.post("/api/generate/llm", json={})
-    assert r.status_code == 501
-
-
 def test_gp_stub_returns_501(client):
     r = client.post("/api/generate/gp", json={})
     assert r.status_code == 501

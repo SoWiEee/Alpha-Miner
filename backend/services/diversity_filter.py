@@ -280,3 +280,56 @@ class DiversityFilter:
 
         max_corr = max(correlations)
         return max_corr <= self.threshold, max_corr
+
+    def filter_batch(
+        self,
+        candidates: list[AlphaCandidate],
+        pool: list[AlphaCandidate],
+        evaluator: AlphaEvaluator,
+        panel: pd.DataFrame,
+    ) -> list[tuple[AlphaCandidate, bool, float]]:
+        """
+        Returns list of (candidate, should_submit, max_corr).
+        Pre-evaluates pool members once for efficiency.
+        Same logic as should_submit() but batched.
+        """
+        # 1. Pre-evaluate all pool members (skip failures)
+        pool_vals: dict[str, pd.Series] = {}
+        for member in pool:
+            try:
+                vals = evaluator.evaluate(member.expression, panel).dropna()
+                if len(vals) >= _MIN_VALID_POINTS:
+                    pool_vals[member.id] = vals
+            except (UnsupportedOperatorError, ValueError):
+                pass
+
+        results = []
+        for cand in candidates:
+            try:
+                cand_vals = evaluator.evaluate(cand.expression, panel).dropna()
+            except (UnsupportedOperatorError, ValueError):
+                results.append((cand, True, float("nan")))
+                continue
+            if len(cand_vals) < _MIN_VALID_POINTS:
+                results.append((cand, True, float("nan")))
+                continue
+
+            correlations = []
+            for pv in pool_vals.values():
+                ac, ap = cand_vals.align(pv, join="inner")
+                mask = ac.notna() & ap.notna()
+                c_clean = ac[mask]
+                p_clean = ap[mask]
+                if len(c_clean) < _MIN_VALID_POINTS:
+                    continue
+                corr, _ = spearmanr(c_clean.values, p_clean.values)
+                if not np.isnan(corr):
+                    correlations.append(abs(corr))
+
+            if not correlations:
+                results.append((cand, True, 0.0))
+            else:
+                max_corr = max(correlations)
+                results.append((cand, max_corr <= self.threshold, max_corr))
+
+        return results
